@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "server",
+    "presentation",
+    "presentation-ssh",
+    "launcher",
+    "process-launcher",
+]
+default-members = ["server"]

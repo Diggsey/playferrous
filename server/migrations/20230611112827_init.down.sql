@@ -1,0 +1,15 @@
+DROP TABLE message;
+DROP TABLE request;
+DROP TYPE request_type;
+DROP TABLE game_step;
+DROP TABLE game_player;
+DROP TABLE game;
+DROP TABLE game_proposal_acceptee;
+DROP TABLE game_proposal;
+DROP TABLE group_member;
+DROP TYPE membership_type;
+DROP TABLE "group";
+DROP TYPE group_visibility;
+DROP TABLE user_friend;
+DROP TABLE user_key;
+DROP TABLE "user";
