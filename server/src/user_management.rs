@@ -1,12 +1,8 @@
-use std::{future::Future, pin::Pin};
-
 use async_trait::async_trait;
-use futures::{FutureExt, TryFutureExt};
 use playferrous_presentation::{
     TerminalConnection, TerminalServerCommand, UserId, UserManagement, UserManagementError,
 };
 use sqlx::{Postgres, Transaction};
-use thiserror::Error;
 use tokio::sync::mpsc;
 
 use crate::database::{Database, TransactError};

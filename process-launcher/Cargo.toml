@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 playferrous-launcher = { path = "../launcher" }
+playferrous-types = { path = "../types" }
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1"
 anyhow = "1.0"
