@@ -1,0 +1,6 @@
+[[launcher]]
+type = "Process"
+path = "games/target/debug"
+
+[[presentation]]
+type = "Ssh"

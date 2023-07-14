@@ -1,19 +1,29 @@
-use async_trait::async_trait;
-use playferrous_presentation::{
-    TerminalConnection, TerminalServerCommand, UserId, UserManagement, UserManagementError,
-};
-use sqlx::{Postgres, Transaction};
-use tokio::sync::mpsc;
+use std::{any::Any, convert::Infallible, sync::Arc};
 
-use crate::database::{Database, TransactError};
+use aerosol::{Aerosol, Constructible};
+use async_trait::async_trait;
+use playferrous_presentation::{TerminalConnection, UserId, UserManagement, UserManagementError};
+use sqlx::{Postgres, Transaction};
+
+use crate::{database::TransactError, terminal_session::TerminalSession};
 
 pub struct UserManagementImpl {
-    database: Database,
+    aero: Aerosol,
 }
 
-impl UserManagementImpl {
-    pub fn new(database: Database) -> Self {
-        Self { database }
+impl Constructible for UserManagementImpl {
+    type Error = Infallible;
+    fn construct(aero: &Aerosol) -> Result<Self, Self::Error> {
+        Ok(Self { aero: aero.clone() })
+    }
+    fn after_construction(
+        this: &(dyn Any + Send + Sync),
+        aero: &Aerosol,
+    ) -> Result<(), Self::Error> {
+        if let Some(arc) = this.downcast_ref::<Arc<Self>>() {
+            aero.insert(arc.clone() as Arc<dyn UserManagement>)
+        }
+        Ok(())
     }
 }
 
@@ -29,18 +39,16 @@ impl UserManagementImpl {
         tx: &mut Transaction<'_, Postgres>,
         username: &str,
     ) -> Result<UserId, TransactError<UserManagementError>> {
-        Ok(UserId(
-            sqlx::query_scalar!(
-                r#"
-                SELECT id FROM "user"
-                WHERE username = $1
-                "#,
-                username
-            )
-            .fetch_optional(tx)
-            .await?
-            .ok_or(UserManagementError::InvalidAuth)?,
-        ))
+        Ok(sqlx::query_scalar!(
+            r#"
+            SELECT id as "id: _" FROM "user"
+            WHERE username = $1
+            "#,
+            username
+        )
+        .fetch_optional(tx)
+        .await?
+        .ok_or(UserManagementError::UserDoesNotExist)?)
     }
 }
 
@@ -51,7 +59,7 @@ impl UserManagement for UserManagementImpl {
         username: &str,
         password: &str,
     ) -> Result<UserId, UserManagementError> {
-        transact!(self.database, |tx| {
+        transact!(UserManagementError, self.aero, |tx| {
             let user_id = self.find_user_id(tx, username).await?;
             if sqlx::query!(
                 r#"
@@ -59,7 +67,7 @@ impl UserManagement for UserManagementImpl {
                 SET last_login_at = NOW()
                 WHERE id = $1 AND password_hash = crypt($2, password_salt)
                 "#,
-                user_id.0,
+                user_id as _,
                 password
             )
             .execute(tx)
@@ -78,7 +86,7 @@ impl UserManagement for UserManagementImpl {
         username: &str,
         fingerprint: &str,
     ) -> Result<UserId, UserManagementError> {
-        transact!(self.database, |tx| {
+        transact!(UserManagementError, self.aero, |tx| {
             let user_id = self.find_user_id(tx, username).await?;
             if sqlx::query!(
                 r#"
@@ -87,7 +95,7 @@ impl UserManagement for UserManagementImpl {
                 FROM user_key
                 WHERE "user".id = $1 AND user_key.user_id = "user".id AND user_key.fingerprint = $2
                 "#,
-                user_id.0,
+                user_id as _,
                 fingerprint
             )
             .execute(tx)
@@ -106,33 +114,31 @@ impl UserManagement for UserManagementImpl {
         username: &str,
         password: &str,
     ) -> Result<UserId, UserManagementError> {
-        transact!(self.database, |tx| {
-            Ok(UserId(
-                sqlx::query_scalar!(
-                    r#"
-                    WITH params AS (
-                        SELECT gen_salt('bf') AS password_salt
-                    )
-                    INSERT INTO "user" (
-                        username,
-                        password_salt,
-                        password_hash
-                    )
-                    SELECT
-                        $1,
-                        password_salt,
-                        crypt($2, password_salt)
-                    FROM params
-                    ON CONFLICT DO NOTHING
-                    RETURNING id
-                    "#,
-                    username,
-                    password
+        transact!(UserManagementError, self.aero, |tx| {
+            Ok(sqlx::query_scalar!(
+                r#"
+                WITH params AS (
+                    SELECT gen_salt('bf') AS password_salt
                 )
-                .fetch_optional(tx)
-                .await?
-                .ok_or(UserManagementError::UserAlreadyExists)?,
-            ))
+                INSERT INTO "user" (
+                    username,
+                    password_salt,
+                    password_hash
+                )
+                SELECT
+                    $1,
+                    password_salt,
+                    crypt($2, password_salt)
+                FROM params
+                ON CONFLICT DO NOTHING
+                RETURNING id AS "id: _"
+                "#,
+                username,
+                password
+            )
+            .fetch_optional(tx)
+            .await?
+            .ok_or(UserManagementError::UserAlreadyExists)?)
         })
     }
     async fn add_user_public_key(
@@ -140,14 +146,14 @@ impl UserManagement for UserManagementImpl {
         user_id: UserId,
         fingerprint: &str,
     ) -> Result<(), UserManagementError> {
-        transact!(self.database, |tx| {
+        transact!(UserManagementError, self.aero, |tx| {
             sqlx::query!(
                 r#"
                     INSERT INTO user_key (user_id, fingerprint)
                     VALUES ($1, $2)
                     ON CONFLICT DO NOTHING
                     "#,
-                user_id.0,
+                user_id as _,
                 fingerprint
             )
             .execute(tx)
@@ -160,25 +166,6 @@ impl UserManagement for UserManagementImpl {
         &self,
         user_id: UserId,
     ) -> Result<TerminalConnection, UserManagementError> {
-        let (tx1, mut rx1) = mpsc::channel(32);
-        let (tx2, rx2) = mpsc::channel(32);
-        tokio::spawn(async move {
-            while let Some(item) = rx1.recv().await {
-                println!("{:?}", item)
-            }
-        });
-        tokio::spawn(async move {
-            while tx2
-                .send(TerminalServerCommand::RequestLine {
-                    prompt: format!("user {}> ", user_id.0),
-                })
-                .await
-                .is_ok()
-            {}
-        });
-        Ok(TerminalConnection {
-            sender: tx1,
-            receiver: rx2,
-        })
+        Ok(TerminalSession::spawn(self.aero.clone(), user_id))
     }
 }

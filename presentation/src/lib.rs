@@ -1,22 +1,61 @@
-use std::{error::Error, sync::Arc};
+use std::{error::Error, fmt::Debug, num::ParseIntError, sync::Arc};
 
 use async_trait::async_trait;
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
 #[async_trait]
 pub trait Presentation: Sized {
     type Error: Error;
-    type Config: DeserializeOwned;
+    type Config: Debug + Serialize + DeserializeOwned;
     async fn new(
-        config: Self::Config,
+        config: &Self::Config,
         user_management: Arc<dyn UserManagement>,
     ) -> Result<Self, Self::Error>;
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
-pub struct UserId(pub i64);
+#[derive(Debug, Copy, Clone, Error)]
+#[error("Invalid ID")]
+pub struct InvalidIdError;
+
+impl From<ParseIntError> for InvalidIdError {
+    fn from(_value: ParseIntError) -> Self {
+        Self
+    }
+}
+
+macro_rules! declare_ids {
+    ($($name:ident => $prefix:literal,)*) => {
+        $(
+            #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, sqlx::Type)]
+            #[sqlx(transparent)]
+            pub struct $name(pub i64);
+
+            impl std::fmt::Display for $name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "{}{}", $prefix, self.0)
+                }
+            }
+
+            impl std::str::FromStr for $name {
+                type Err = InvalidIdError;
+
+                fn from_str(s: &str) -> Result<Self, Self::Err> {
+                    Ok(Self(s.strip_prefix($prefix).ok_or(InvalidIdError)?.parse()?))
+                }
+            }
+
+        )*
+    };
+}
+
+declare_ids! {
+    UserId => "u",
+    GameId => "g",
+    GameProposalId => "p",
+    SessionId => "s",
+}
 
 #[derive(Debug, Error)]
 pub enum UserManagementError {

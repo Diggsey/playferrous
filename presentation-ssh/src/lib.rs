@@ -3,7 +3,7 @@ use std::{io, sync::Arc};
 use async_trait::async_trait;
 use playferrous_presentation::{Presentation, UserManagement};
 use russh::MethodSet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 mod data_writer;
 mod error;
@@ -21,7 +21,7 @@ fn default_key_path() -> String {
     "server_key.p8".into()
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_port")]
     port: u16,
@@ -60,7 +60,7 @@ impl Presentation for PresentationSsh {
     type Config = Config;
     type Error = Error;
 
-    async fn new(config: Config, user_management: Arc<dyn UserManagement>) -> Result<Self, Error> {
+    async fn new(config: &Config, user_management: Arc<dyn UserManagement>) -> Result<Self, Error> {
         let key = Self::load_or_generate_key(&config).await?;
         let mut ssh_config = russh::server::Config {
             auth_rejection_time: std::time::Duration::from_millis(200),

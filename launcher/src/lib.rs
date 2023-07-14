@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 use async_trait::async_trait;
 use ijson::IValue;
@@ -23,13 +23,13 @@ pub enum GameError {
 }
 
 #[async_trait]
-pub trait Launcher: Send + Sync {
+pub trait Launcher: Send + Sync + Debug {
     async fn launch(&self, game_setup: GameSetup) -> Result<Box<dyn GameInstance>, LauncherError>;
 }
 
 #[async_trait]
 pub trait LauncherConfig: DeserializeOwned {
-    async fn start_launcher(self) -> anyhow::Result<Arc<dyn Launcher>>;
+    async fn start_launcher(&self) -> anyhow::Result<Arc<dyn Launcher>>;
 }
 
 #[async_trait]

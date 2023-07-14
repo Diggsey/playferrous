@@ -41,7 +41,12 @@ pub async fn run(
         .await?;
     while let Some(server_cmd) = loop {
         select! {
-                _ = data_reader.read_buf(&mut null_buf) => {}
+                cnt = data_reader.read_buf(&mut null_buf) => {
+                    if cnt? == 0 {
+                        // Client disconnected
+                        break None
+                    }
+                }
                 server_cmd = terminal_connection.receiver.recv() => break server_cmd
         }
     } {
@@ -60,6 +65,7 @@ pub async fn run(
                 data_writer
                     .write(text.replace("\n", "\r\n").as_bytes())
                     .await?;
+                data_writer.flush().await?;
             }
         }
     }

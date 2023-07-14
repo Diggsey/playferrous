@@ -1,0 +1,55 @@
+help_text = """
+Playferrous terminal interface
+
+While in a game, server commands may still be executed by prefixing them with a `.`
+"""
+
+[[group]]
+help_text = "Games:"
+
+[[group.command]]
+name = "games"
+args = "<filters>"
+
+[[group.command]]
+name = "game"
+args = "<game-id>"
+
+[[group.command]]
+name = "retire"
+args = "<game-id>"
+
+[[group]]
+help_text = "Proposals:"
+
+[[group.command]]
+name = "proposals"
+args = "<filters>"
+
+[[group.command]]
+name = "propose"
+args = "<game-type>"
+
+[[group.command]]
+name = "withdraw"
+args = "<proposal-id>"
+
+[[group]]
+help_text = "Sessions:"
+
+[[group.command]]
+name = "sessions"
+
+[[group.command]]
+name = "enter"
+args = "<session-id>"
+
+[[group.command]]
+name = "exit"
+
+[[group]]
+help_text = "Misc:"
+
+[[group.command]]
+name = "help"
+args = "<command>"

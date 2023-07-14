@@ -13,19 +13,22 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessLauncherConfig {
     path: String,
 }
 
+#[derive(Debug)]
 pub struct ProcessLauncher {
     config: ProcessLauncherConfig,
 }
 
 #[async_trait]
 impl LauncherConfig for ProcessLauncherConfig {
-    async fn start_launcher(self) -> anyhow::Result<Arc<dyn Launcher>> {
-        Ok(Arc::new(ProcessLauncher { config: self }))
+    async fn start_launcher(&self) -> anyhow::Result<Arc<dyn Launcher>> {
+        Ok(Arc::new(ProcessLauncher {
+            config: self.clone(),
+        }))
     }
 }
 

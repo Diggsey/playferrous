@@ -1,14 +1,38 @@
 use std::sync::Arc;
 
-use playferrous_presentation::Presentation;
-use playferrous_presentation_ssh::PresentationSsh;
+use aerosol::{Aerosol, AsyncConstructible};
+use async_trait::async_trait;
+use launchers::AnyLauncherConfig;
+use presentations::{AnyPresentationConfig, Presentations};
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
-use crate::{database::Database, user_management::UserManagementImpl};
+use crate::user_management::UserManagementImpl;
 
 #[macro_use]
 mod database;
+mod active_session;
+mod game_manager;
+mod launchers;
+mod presentations;
+mod proposal_manager;
+mod terminal_session;
 mod user_management;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    launcher: Vec<AnyLauncherConfig>,
+    presentation: Vec<AnyPresentationConfig>,
+}
+
+#[async_trait]
+impl AsyncConstructible for Config {
+    type Error = anyhow::Error;
+    async fn construct_async(_aero: &Aerosol) -> Result<Self, Self::Error> {
+        let config_str = tokio::fs::read_to_string("playferrous.toml").await?;
+        Ok(toml::from_str(&config_str)?)
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,9 +41,10 @@ async fn main() -> anyhow::Result<()> {
         .with_span_events(FmtSpan::ACTIVE)
         .with_env_filter(EnvFilter::from_default_env())
         .init();
-    let database = Database::connect().await?;
-    let user_management = Arc::new(UserManagementImpl::new(database));
-    let _ssh_presentation = PresentationSsh::new(Default::default(), user_management).await?;
-    println!("Hello, world!");
+
+    let aero = Aerosol::new();
+    aero.init::<Arc<UserManagementImpl>>();
+    aero.init_async::<Arc<Presentations>>().await;
+    println!("Started...");
     Ok(())
 }
