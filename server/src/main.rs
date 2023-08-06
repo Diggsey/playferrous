@@ -17,6 +17,7 @@ mod launchers;
 mod presentations;
 mod proposal_manager;
 mod user_management;
+mod utils;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {

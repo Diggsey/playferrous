@@ -8,7 +8,7 @@ pub trait Actor: Sized + Send + 'static {
     fn spawn(self) {
         tokio::spawn(async move {
             if let Err(e) = self.run().await {
-                tracing::error!("{}: {}", type_name::<Self>(), e);
+                tracing::error!("{}: {}\n{}", type_name::<Self>(), e, e.backtrace());
             }
         });
     }

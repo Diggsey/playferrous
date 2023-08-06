@@ -1,17 +1,21 @@
-use std::{collections::HashMap, convert::Infallible, future::Future, sync::Arc, time::Duration};
+use std::{collections::HashMap, convert::Infallible, sync::Arc, time::Duration};
 
 use aerosol::{Aero, Constructible};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use futures::{future::BoxFuture, FutureExt};
 use playferrous_presentation::{
     actor::Actor,
     bichannel::{bichannel, Bichannel},
-    GameProposalId, PresentationKind, UserId,
+    GameProposalId, PresentationKind, SessionCommand, SessionEvent, TerminalSessionCommand,
+    TerminalSessionEvent, UserId,
 };
 use tokio::sync::mpsc;
 
-use crate::connection_manager::{ConnectionToSessionMsg, SessionMember, SessionToConnectionMsg};
+use crate::{
+    connection_manager::{ConnectionToSessionMsg, SessionMember, SessionToConnectionMsg},
+    utils::{FutureExt2, FutureIteratorExt},
+};
 
 #[derive(Debug)]
 struct EnterProposalSession {
@@ -83,12 +87,14 @@ impl ProposalManager {
     }
 }
 
+#[derive(Debug)]
 struct Connection {
     #[allow(unused)]
     kind: PresentationKind,
     bichannel: Bichannel<SessionToConnectionMsg, ConnectionToSessionMsg>,
 }
 
+#[derive(Debug)]
 struct ProposalActor {
     aero: Aero,
     proposal_id: GameProposalId,
@@ -98,16 +104,6 @@ struct ProposalActor {
 
 const USER_TIMEOUT: Duration = Duration::from_millis(200);
 
-fn recv_from_connections(
-    connections: &mut HashMap<UserId, Connection>,
-) -> impl Future<Output = Option<(UserId, Option<ConnectionToSessionMsg>)>> + '_ {
-    let futures_unordered = connections
-        .iter_mut()
-        .map(move |(&user_id, conn)| conn.bichannel.r.recv().map(move |res| (user_id, res)))
-        .collect::<FuturesUnordered<_>>();
-    futures_unordered.into_future().map(|x| x.0)
-}
-
 #[async_trait]
 impl Actor for ProposalActor {
     async fn run(mut self) -> anyhow::Result<()> {
@@ -116,13 +112,11 @@ impl Actor for ProposalActor {
             tokio::select! {
                 biased;
                 maybe_msg = self.system_r.recv() => if let Some(msg) = maybe_msg { self.handle_system_msg(msg).await? } else {break},
-                maybe_msg = recv_from_connections(&mut self.connections) => {
-                    if let Some((user_id, maybe_msg)) = maybe_msg {
-                        if let Some(msg) = maybe_msg {
-                            self.handle_connection_msg(user_id, msg).await?;
-                        } else {
-                            self.disconnect_user(user_id).await;
-                        }
+                (user_id, maybe_msg) = self.connections.iter_mut().map(|(user_id, conn)| conn.bichannel.r.recv().with_key(*user_id)).select() => {
+                    if let Some(msg) = maybe_msg {
+                        self.handle_connection_msg(user_id, msg).await?;
+                    } else {
+                        self.disconnect_user(user_id).await;
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_secs(1)), if self.connections.is_empty() => {
@@ -130,11 +124,13 @@ impl Actor for ProposalActor {
                 }
             }
         }
+        tracing::info!("Stopping proposal {}", self.proposal_id);
         Ok(())
     }
 }
 
 impl ProposalActor {
+    #[tracing::instrument(skip(self))]
     async fn handle_system_msg(&mut self, msg: SystemToProposalMsg) -> anyhow::Result<()> {
         match msg {
             SystemToProposalMsg::Enter(conn) => {
@@ -155,13 +151,34 @@ impl ProposalActor {
         }
         Ok(())
     }
+    async fn handle_terminal_cmd(
+        &mut self,
+        user_id: UserId,
+        msg: TerminalSessionCommand,
+    ) -> anyhow::Result<()> {
+        match msg {
+            TerminalSessionCommand::Line(line) => {
+                self.broadcast(SessionToConnectionMsg::Event(SessionEvent::Terminal(
+                    TerminalSessionEvent::Line(format!("{user_id}: {line}")),
+                )))
+                .await;
+            }
+        }
+        Ok(())
+    }
+    #[tracing::instrument(skip(self))]
     async fn handle_connection_msg(
         &mut self,
-        _user_id: UserId,
+        user_id: UserId,
         msg: ConnectionToSessionMsg,
     ) -> anyhow::Result<()> {
-        match msg {}
+        match msg {
+            ConnectionToSessionMsg::Command(SessionCommand::Terminal(cmd)) => {
+                self.handle_terminal_cmd(user_id, cmd).await
+            }
+        }
     }
+    #[tracing::instrument(skip(self))]
     async fn disconnect_user(&mut self, user_id: UserId) {
         self.connections.remove(&user_id);
         tracing::info!("User {} left.", user_id);

@@ -185,9 +185,9 @@ pub struct GameProposalMin {
 
 #[derive(Debug, Clone)]
 pub struct SessionMin {
-    pub id: GameProposalId,
+    pub id: SessionId,
     pub created_at: DateTime<Utc>,
-    pub type_: String,
+    pub kind: SessionKind,
 }
 
 #[derive(Debug, Clone)]

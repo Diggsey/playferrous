@@ -6,7 +6,7 @@ use playferrous_presentation::{
     terminal::{PresentationToTerminalMsg, TerminalToPresentationMsg},
 };
 use thiserror::Error;
-use tokio::{io::AsyncWriteExt, select};
+use tokio::io::AsyncWriteExt;
 
 use tracing::instrument;
 
@@ -39,23 +39,22 @@ pub async fn run(
         .build_async_tokio(&mut data_reader, &mut data_writer)
         .await?;
     while let Some(server_cmd) = loop {
-        select! {
-                line = editor
-                .readline("> ", &mut data_reader, &mut data_writer) => {
-                    let _ = presentation_connection
-                    .s
-                    .send(TerminalToPresentationMsg::ReadLine(line?.into()))
-                    .await;
-                }
-                server_cmd = presentation_connection.r.recv() => break server_cmd
+        tokio::select! {
+            line = editor.readline("> ", &mut data_reader, &mut data_writer) => {
+                let _ = presentation_connection
+                .s
+                .send(TerminalToPresentationMsg::ReadLine(line?.into()))
+                .await;
+            },
+            server_cmd = presentation_connection.r.recv() => break server_cmd,
         }
     } {
+        tracing::info!("Command: {:?}", server_cmd);
         match server_cmd {
             PresentationToTerminalMsg::PrintLine(line)
             | PresentationToTerminalMsg::ErrorLine(line) => {
-                data_writer
-                    .write(line.replace("\n", "\r\n").as_bytes())
-                    .await?;
+                let data = format!("\x1b[G\x1b[K{}\r\n", line.replace("\n", "\r\n"));
+                data_writer.write(data.as_bytes()).await?;
                 data_writer.flush().await?;
             }
         }

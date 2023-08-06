@@ -8,7 +8,8 @@ use playferrous_presentation::{
     actor::Actor,
     bichannel::{bichannel, Bichannel},
     ConnectionToPresentationMsg, CreateGameProposal, PresentationKind, PresentationToConnectionMsg,
-    SessionEvent, SessionId, SessionInfo, SessionKind, TerminalSessionEvent, UserId,
+    SessionCommand, SessionEvent, SessionId, SessionInfo, SessionKind, TerminalSessionEvent,
+    UserId,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -21,6 +22,7 @@ use crate::{
     },
     game_manager::GameManager,
     proposal_manager::ProposalManager,
+    utils::FutureIteratorExt,
 };
 
 #[derive(Debug, Clone)]
@@ -51,8 +53,6 @@ impl Constructible for ConnectionManager {
 
 #[derive(Debug, Error)]
 enum ConnectionError {
-    #[error("Client disconnected")]
-    Disconnected,
     #[error("Present: {0}")]
     Present(String),
     #[error(transparent)]
@@ -136,7 +136,9 @@ impl ConnectionManager {
 }
 
 #[derive(Debug, Clone)]
-pub enum ConnectionToSessionMsg {}
+pub enum ConnectionToSessionMsg {
+    Command(SessionCommand),
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionMember {
@@ -148,6 +150,7 @@ pub struct SessionMember {
 pub enum SessionToConnectionMsg {
     UserEntered(SessionMember),
     UserExited(SessionMember),
+    Event(SessionEvent),
 }
 
 #[derive(Debug)]
@@ -166,15 +169,8 @@ struct ConnectionActor {
 }
 
 impl ConnectionActor {
-    async fn send_to_presentation(
-        &mut self,
-        msg: ConnectionToPresentationMsg,
-    ) -> Result<(), ConnectionError> {
-        self.presentation_bichannel
-            .s
-            .send(msg)
-            .await
-            .map_err(|_| ConnectionError::Disconnected)
+    async fn send_to_presentation(&mut self, msg: ConnectionToPresentationMsg) {
+        let _ = self.presentation_bichannel.s.send(msg).await;
     }
     async fn propose(&mut self, proposal: CreateGameProposal) -> Result<(), ConnectionError> {
         transact!(ConnectionError, self.aero, |tx| {
@@ -187,7 +183,8 @@ impl ConnectionActor {
             Ok(database::session::list_for_user(tx, self.user_id).await?)
         })?;
         self.send_to_presentation(ConnectionToPresentationMsg::SessionList(sessions))
-            .await
+            .await;
+        Ok(())
     }
     async fn enter(&mut self, session_id: SessionId) -> Result<(), ConnectionError> {
         let session = transact!(ConnectionError, self.aero, |tx| {
@@ -222,7 +219,7 @@ impl ConnectionActor {
                 (
                     SessionKind::GameProposal(proposal_id),
                     self.aero
-                        .obtain::<Arc<ProposalManager>>()
+                        .obtain::<ProposalManager>()
                         .enter_session(proposal_id, self.user_id, self.kind)
                         .await?,
                 )
@@ -234,14 +231,15 @@ impl ConnectionActor {
             id: session_id,
             kind,
         }))
-        .await?;
+        .await;
 
         Ok(())
     }
     async fn exit(&mut self) -> Result<(), ConnectionError> {
         if self.active_session.take().is_some() {
             self.send_to_presentation(ConnectionToPresentationMsg::ExitedSession)
-                .await
+                .await;
+            Ok(())
         } else {
             Err(ConnectionError::Present("No active session".into()))
         }
@@ -251,19 +249,22 @@ impl ConnectionActor {
             Ok(database::proposal::list_for_user(tx, self.user_id).await?)
         })?;
         self.send_to_presentation(ConnectionToPresentationMsg::ProposalList(proposals))
-            .await
+            .await;
+        Ok(())
     }
     async fn messages(&mut self) -> Result<(), ConnectionError> {
         let messages = transact!(ConnectionError, self.aero, |tx| {
             Ok(database::message::list_for_user(tx, self.user_id).await?)
         })?;
         self.send_to_presentation(ConnectionToPresentationMsg::MessageList(messages))
-            .await
+            .await;
+        Ok(())
     }
+    #[tracing::instrument(skip(self))]
     async fn handle_presentation_msg(
         &mut self,
         msg: PresentationToConnectionMsg,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ConnectionError> {
         match msg {
             PresentationToConnectionMsg::ListGames => todo!(),
             PresentationToConnectionMsg::ListProposals => self.proposals().await?,
@@ -273,28 +274,48 @@ impl ConnectionActor {
             PresentationToConnectionMsg::Withdraw(_) => todo!(),
             PresentationToConnectionMsg::Enter(session_id) => self.enter(session_id).await?,
             PresentationToConnectionMsg::Exit => self.exit().await?,
-            PresentationToConnectionMsg::SessionCommand(_) => todo!(),
+            PresentationToConnectionMsg::SessionCommand(cmd) => {
+                if let Some(session) = &mut self.active_session {
+                    let _ = session
+                        .bichannel
+                        .s
+                        .send(ConnectionToSessionMsg::Command(cmd))
+                        .await;
+                }
+            }
         }
         Ok(())
     }
-    async fn handle_session_msg(&mut self, msg: SessionToConnectionMsg) -> anyhow::Result<()> {
+    #[tracing::instrument(skip(self))]
+    async fn handle_session_msg(
+        &mut self,
+        msg: SessionToConnectionMsg,
+    ) -> Result<(), ConnectionError> {
         match msg {
             SessionToConnectionMsg::UserEntered(_) => {
                 self.send_to_presentation(ConnectionToPresentationMsg::SessionEvent(
                     SessionEvent::Terminal(TerminalSessionEvent::Line("User entered".into())),
                 ))
-                .await?;
+                .await;
             }
             SessionToConnectionMsg::UserExited(_) => {
                 self.send_to_presentation(ConnectionToPresentationMsg::SessionEvent(
                     SessionEvent::Terminal(TerminalSessionEvent::Line("User exited".into())),
                 ))
-                .await?;
+                .await;
+            }
+            SessionToConnectionMsg::Event(ev) => {
+                self.send_to_presentation(ConnectionToPresentationMsg::SessionEvent(ev))
+                    .await;
             }
         }
         Ok(())
     }
-    async fn handle_system_msg(&mut self, msg: SystemToConnectionMsg) -> anyhow::Result<()> {
+    #[tracing::instrument(skip(self))]
+    async fn handle_system_msg(
+        &mut self,
+        msg: SystemToConnectionMsg,
+    ) -> Result<(), ConnectionError> {
         match msg {
             SystemToConnectionMsg::NewMessage => todo!(),
         }
@@ -305,23 +326,31 @@ impl ConnectionActor {
 impl Actor for ConnectionActor {
     async fn run(mut self) -> anyhow::Result<()> {
         loop {
-            tokio::select! {
+            let res = tokio::select! {
                 biased;
                 maybe_msg = self.system_r.recv() => {
                     let Some(msg) = maybe_msg else { break };
-                    self.handle_system_msg(msg).await?
+                    self.handle_system_msg(msg).await
                 },
-                maybe_msg = self.active_session.as_mut().unwrap().bichannel.r.recv(), if self.active_session.is_some() => {
+                maybe_msg = self.active_session.as_mut().map(|session| session.bichannel.r.recv()).select() => {
                     if let Some(msg) = maybe_msg {
-                        self.handle_session_msg(msg).await?;
+                        self.handle_session_msg(msg).await
                     } else {
-                        self.exit().await?;
+                        self.exit().await
                     }
                 },
                 maybe_msg = self.presentation_bichannel.r.recv() => {
                     let Some(msg) = maybe_msg else { break };
-                    self.handle_presentation_msg(msg).await?
+                    self.handle_presentation_msg(msg).await
                 },
+            };
+            match res {
+                Ok(()) => {}
+                Err(ConnectionError::Present(e)) => {
+                    self.send_to_presentation(ConnectionToPresentationMsg::Error(e))
+                        .await
+                }
+                Err(ConnectionError::Internal(e)) => return Err(e),
             }
         }
         Ok(())

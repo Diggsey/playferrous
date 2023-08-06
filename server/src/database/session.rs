@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use playferrous_presentation::{GameId, GameProposalId, SessionId, SessionMin, UserId};
+use playferrous_presentation::{
+    GameId, GameProposalId, SessionId, SessionKind, SessionMin, UserId,
+};
 
 use super::transaction::Transaction;
 
@@ -21,14 +23,39 @@ pub struct Session {
     pub game_proposal_id: Option<GameProposalId>,
 }
 
+struct SessionMinRecord {
+    pub id: SessionId,
+    pub type_: SessionType,
+    pub created_at: DateTime<Utc>,
+    pub game_id: Option<GameId>,
+    pub game_proposal_id: Option<GameProposalId>,
+}
+
+impl SessionMinRecord {
+    pub fn reify(self) -> SessionMin {
+        SessionMin {
+            id: self.id,
+            created_at: self.created_at,
+            kind: match self.type_ {
+                SessionType::Game => SessionKind::Game(self.game_id.unwrap()),
+                SessionType::GameProposal => {
+                    SessionKind::GameProposal(self.game_proposal_id.unwrap())
+                }
+            },
+        }
+    }
+}
+
 pub async fn list_for_user(tx: &mut Transaction, user_id: UserId) -> sqlx::Result<Vec<SessionMin>> {
-    Ok(sqlx::query_as!(
-        SessionMin,
+    let records = sqlx::query_as!(
+        SessionMinRecord,
         r#"
         SELECT
             id as "id: _",
             "type" as "type_: _",
-            created_at
+            created_at,
+            game_id as "game_id: _",
+            game_proposal_id as "game_proposal_id: _"
         FROM session
         WHERE user_id = $1
         ORDER BY created_at DESC
@@ -36,7 +63,8 @@ pub async fn list_for_user(tx: &mut Transaction, user_id: UserId) -> sqlx::Resul
         user_id as _
     )
     .fetch_all(tx)
-    .await?)
+    .await?;
+    Ok(records.into_iter().map(|r| r.reify()).collect())
 }
 
 pub async fn get_by_id_and_user(

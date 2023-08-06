@@ -7,8 +7,8 @@ use crate::{
     bichannel::{bichannel, Bichannel},
     select_recv_loop, ConnectionToPresentationMsg, CreateGameProposal, GameProposalMin,
     InvalidIdError, MessageMin, PresentationKind, PresentationToConnectionMsg, SessionCommand,
-    SessionEvent, SessionInfo, SessionMin, TerminalSessionCommand, TerminalSessionEvent, UserId,
-    UserManagement,
+    SessionEvent, SessionInfo, SessionKind, SessionMin, TerminalSessionCommand,
+    TerminalSessionEvent, UserId, UserManagement,
 };
 
 use self::ui::{CommandInterpretation, Ui};
@@ -198,8 +198,13 @@ impl TerminalPresentation {
     ) -> Result<(), TerminalError> {
         for session in sessions {
             self.println(format!(
-                "{:>6} {:12?} {}\n",
-                session.id, session.type_, session.created_at
+                "{:>6} {:12} {}\n",
+                session.id,
+                match session.kind {
+                    SessionKind::GameProposal(_) => "proposal",
+                    SessionKind::Game(_) => "game",
+                },
+                session.created_at
             ))
             .await?;
         }
@@ -268,6 +273,7 @@ impl TerminalPresentation {
             TerminalToPresentationMsg::ReadLine(line) => self.handle_read_line(line).await,
         }
     }
+    #[tracing::instrument(skip(self))]
     async fn handle_connection_msg(
         &mut self,
         msg: ConnectionToPresentationMsg,
