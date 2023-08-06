@@ -4,6 +4,7 @@ use bytes::{buf::UninitSlice, BufMut};
 pub struct NullBuf([u8; 16]);
 
 impl NullBuf {
+    #[allow(unused)]
     pub fn new() -> Self {
         Self([0; 16])
     }

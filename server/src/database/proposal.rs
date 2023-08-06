@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use ijson::IValue;
-use playferrous_presentation::{GameProposalId, UserId};
+use playferrous_presentation::{GameProposalId, GameProposalMin, UserId};
 use sqlx::types::Json;
 
-use super::PgTransaction;
+use super::transaction::Transaction;
 
 #[derive(Debug)]
 pub struct GameProposal {
@@ -19,7 +19,7 @@ pub struct GameProposal {
 }
 
 pub async fn create(
-    tx: &mut PgTransaction,
+    tx: &mut Transaction,
     game_type: &str,
     user_id: UserId,
 ) -> sqlx::Result<GameProposal> {
@@ -78,4 +78,24 @@ pub async fn create(
     .execute(&mut *tx)
     .await?;
     Ok(proposal)
+}
+
+pub async fn list_for_user(
+    tx: &mut Transaction,
+    user_id: UserId,
+) -> sqlx::Result<Vec<GameProposalMin>> {
+    Ok(sqlx::query_as!(
+        GameProposalMin,
+        r#"
+        SELECT
+            id as "id!: _",
+            game_type as "game_type!",
+            created_at as "created_at!"
+        FROM visible_game_proposals($1)
+        ORDER BY created_at DESC
+        "#,
+        user_id as _
+    )
+    .fetch_all(tx)
+    .await?)
 }

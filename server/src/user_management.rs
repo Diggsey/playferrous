@@ -1,25 +1,27 @@
 use std::{any::Any, convert::Infallible, sync::Arc};
 
-use aerosol::{Aerosol, Constructible};
+use aerosol::{Aero, Constructible};
 use async_trait::async_trait;
-use playferrous_presentation::{TerminalConnection, UserId, UserManagement, UserManagementError};
-use sqlx::{Postgres, Transaction};
+use playferrous_presentation::{
+    bichannel::Bichannel, ConnectionToPresentationMsg, PresentationKind,
+    PresentationToConnectionMsg, UserId, UserManagement, UserManagementError,
+};
 
-use crate::{database::TransactError, terminal_session::TerminalSession};
+use crate::{
+    connection_manager::ConnectionManager,
+    database::{transaction::Transaction, TransactError},
+};
 
 pub struct UserManagementImpl {
-    aero: Aerosol,
+    aero: Aero,
 }
 
 impl Constructible for UserManagementImpl {
     type Error = Infallible;
-    fn construct(aero: &Aerosol) -> Result<Self, Self::Error> {
+    fn construct(aero: &Aero) -> Result<Self, Self::Error> {
         Ok(Self { aero: aero.clone() })
     }
-    fn after_construction(
-        this: &(dyn Any + Send + Sync),
-        aero: &Aerosol,
-    ) -> Result<(), Self::Error> {
+    fn after_construction(this: &(dyn Any + Send + Sync), aero: &Aero) -> Result<(), Self::Error> {
         if let Some(arc) = this.downcast_ref::<Arc<Self>>() {
             aero.insert(arc.clone() as Arc<dyn UserManagement>)
         }
@@ -36,7 +38,7 @@ impl From<UserManagementError> for TransactError<UserManagementError> {
 impl UserManagementImpl {
     async fn find_user_id(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut Transaction,
         username: &str,
     ) -> Result<UserId, TransactError<UserManagementError>> {
         Ok(sqlx::query_scalar!(
@@ -162,10 +164,14 @@ impl UserManagement for UserManagementImpl {
             Ok(())
         })
     }
-    async fn connect_terminal(
+    async fn connect(
         &self,
         user_id: UserId,
-    ) -> Result<TerminalConnection, UserManagementError> {
-        Ok(TerminalSession::spawn(self.aero.clone(), user_id))
+        kind: PresentationKind,
+    ) -> anyhow::Result<Bichannel<PresentationToConnectionMsg, ConnectionToPresentationMsg>> {
+        self.aero
+            .obtain::<ConnectionManager>()
+            .open(user_id, kind)
+            .await
     }
 }

@@ -1,42 +1,44 @@
-use std::{
-    collections::HashMap,
-    convert::Infallible,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, convert::Infallible, future::Future, sync::Arc, time::Duration};
 
-use aerosol::{Aerosol, Constructible};
-use futures::{future::BoxFuture, FutureExt};
-use playferrous_presentation::{GameProposalId, UserId};
+use aerosol::{Aero, Constructible};
+use async_trait::async_trait;
+use dashmap::DashMap;
+use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+use playferrous_presentation::{
+    actor::Actor,
+    bichannel::{bichannel, Bichannel},
+    GameProposalId, PresentationKind, UserId,
+};
 use tokio::sync::mpsc;
 
-use crate::active_session::{ClientSessionCommand, ServerSessionCommand, SessionLink};
+use crate::connection_manager::{ConnectionToSessionMsg, SessionMember, SessionToConnectionMsg};
 
-struct ProposalEvent {
+#[derive(Debug)]
+struct EnterProposalSession {
     user_id: UserId,
-    event_type: ProposalEventType,
-}
-
-enum ProposalEventType {
-    Enter(mpsc::Sender<ServerSessionCommand>),
-    Leave,
-    Command(ClientSessionCommand),
+    bichannel: Bichannel<SessionToConnectionMsg, ConnectionToSessionMsg>,
+    kind: PresentationKind,
 }
 
 #[derive(Debug)]
-struct ProposalHandle {
-    tx: mpsc::Sender<ProposalEvent>,
+enum SystemToProposalMsg {
+    Enter(EnterProposalSession),
 }
 
 #[derive(Debug)]
+struct Proposal {
+    s: mpsc::Sender<SystemToProposalMsg>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ProposalManager {
-    proposals: Arc<Mutex<HashMap<GameProposalId, ProposalHandle>>>,
-    aero: Aerosol,
+    proposals: Arc<DashMap<GameProposalId, Proposal>>,
+    aero: Aero,
 }
 
 impl Constructible for ProposalManager {
     type Error = Infallible;
-    fn construct(aero: &Aerosol) -> Result<Self, Self::Error> {
+    fn construct(aero: &Aero) -> Result<Self, Self::Error> {
         Ok(Self {
             proposals: Default::default(),
             aero: aero.clone(),
@@ -49,151 +51,164 @@ impl ProposalManager {
         &self,
         proposal_id: GameProposalId,
         user_id: UserId,
-        mut link: SessionLink,
-    ) -> anyhow::Result<()> {
-        let tx = {
-            let mut guard = self.proposals.lock().expect("Lock to not be poisoned...");
-            guard
+        kind: PresentationKind,
+    ) -> anyhow::Result<Bichannel<ConnectionToSessionMsg, SessionToConnectionMsg>> {
+        let s = {
+            self.proposals
                 .entry(proposal_id)
                 .or_insert_with(|| self.start_proposal(proposal_id))
-                .tx
+                .s
                 .clone()
         };
-        tokio::spawn(async move {
-            if tx
-                .send(ProposalEvent {
-                    user_id,
-                    event_type: ProposalEventType::Enter(link.tx),
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-            while let Some(cmd) = link.rx.recv().await {
-                if tx
-                    .send(ProposalEvent {
-                        user_id,
-                        event_type: ProposalEventType::Command(cmd),
-                    })
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            if tx
-                .send(ProposalEvent {
-                    user_id,
-                    event_type: ProposalEventType::Leave,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-        });
-        Ok(())
+        let (session_bichannel, connection_bichannel) = bichannel(4);
+        s.send(SystemToProposalMsg::Enter(EnterProposalSession {
+            user_id,
+            bichannel: connection_bichannel,
+            kind,
+        }))
+        .await?;
+        Ok(session_bichannel)
     }
 
-    fn start_proposal(&self, proposal_id: GameProposalId) -> ProposalHandle {
-        let (tx, rx) = mpsc::channel(4);
-        tokio::spawn(
-            Proposal {
-                proposal_id,
-                rx,
-                proposals: self.proposals.clone(),
-                users: Default::default(),
-            }
-            .run(),
-        );
-        ProposalHandle { tx }
+    fn start_proposal(&self, proposal_id: GameProposalId) -> Proposal {
+        let (system_s, system_r) = mpsc::channel(4);
+        ProposalActor {
+            aero: self.aero.clone(),
+            proposal_id,
+            system_r,
+            connections: Default::default(),
+        }
+        .spawn();
+        Proposal { s: system_s }
     }
 }
 
-struct Proposal {
+struct Connection {
+    #[allow(unused)]
+    kind: PresentationKind,
+    bichannel: Bichannel<SessionToConnectionMsg, ConnectionToSessionMsg>,
+}
+
+struct ProposalActor {
+    aero: Aero,
     proposal_id: GameProposalId,
-    rx: mpsc::Receiver<ProposalEvent>,
-    proposals: Arc<Mutex<HashMap<GameProposalId, ProposalHandle>>>,
-    users: HashMap<UserId, mpsc::Sender<ServerSessionCommand>>,
+    system_r: mpsc::Receiver<SystemToProposalMsg>,
+    connections: HashMap<UserId, Connection>,
 }
 
 const USER_TIMEOUT: Duration = Duration::from_millis(200);
 
-impl Proposal {
+fn recv_from_connections(
+    connections: &mut HashMap<UserId, Connection>,
+) -> impl Future<Output = Option<(UserId, Option<ConnectionToSessionMsg>)>> + '_ {
+    let futures_unordered = connections
+        .iter_mut()
+        .map(move |(&user_id, conn)| conn.bichannel.r.recv().map(move |res| (user_id, res)))
+        .collect::<FuturesUnordered<_>>();
+    futures_unordered.into_future().map(|x| x.0)
+}
+
+#[async_trait]
+impl Actor for ProposalActor {
+    async fn run(mut self) -> anyhow::Result<()> {
+        tracing::info!("Running proposal {}", self.proposal_id);
+        loop {
+            tokio::select! {
+                biased;
+                maybe_msg = self.system_r.recv() => if let Some(msg) = maybe_msg { self.handle_system_msg(msg).await? } else {break},
+                maybe_msg = recv_from_connections(&mut self.connections) => {
+                    if let Some((user_id, maybe_msg)) = maybe_msg {
+                        if let Some(msg) = maybe_msg {
+                            self.handle_connection_msg(user_id, msg).await?;
+                        } else {
+                            self.disconnect_user(user_id).await;
+                        }
+                    }
+                },
+                _ = tokio::time::sleep(Duration::from_secs(1)), if self.connections.is_empty() => {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ProposalActor {
+    async fn handle_system_msg(&mut self, msg: SystemToProposalMsg) -> anyhow::Result<()> {
+        match msg {
+            SystemToProposalMsg::Enter(conn) => {
+                tracing::info!("User {} entered.", conn.user_id);
+                self.broadcast(SessionToConnectionMsg::UserEntered(SessionMember {
+                    user_id: conn.user_id,
+                    player_index: None,
+                }))
+                .await;
+                self.connections.insert(
+                    conn.user_id,
+                    Connection {
+                        kind: conn.kind,
+                        bichannel: conn.bichannel,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+    async fn handle_connection_msg(
+        &mut self,
+        _user_id: UserId,
+        msg: ConnectionToSessionMsg,
+    ) -> anyhow::Result<()> {
+        match msg {}
+    }
+    async fn disconnect_user(&mut self, user_id: UserId) {
+        self.connections.remove(&user_id);
+        tracing::info!("User {} left.", user_id);
+        self.broadcast(SessionToConnectionMsg::UserExited(SessionMember {
+            user_id,
+            player_index: None,
+        }))
+        .await;
+    }
     fn timeout_user(&mut self, user_id: UserId) -> BoxFuture<()> {
         async move {
-            self.users.remove(&user_id);
+            self.connections.remove(&user_id);
             tracing::info!("User {} left due to a timeout.", user_id);
-            self.broadcast(ServerSessionCommand::TerminalPrint(format!(
-                "User {} left due to a timeout.\n",
-                user_id
-            )))
+            self.broadcast(SessionToConnectionMsg::UserExited(SessionMember {
+                user_id,
+                player_index: None,
+            }))
             .await;
         }
         .boxed()
     }
-    async fn send_to_user(&mut self, user_id: UserId, cmd: ServerSessionCommand) {
-        if let Some(tx) = self.users.get_mut(&user_id) {
-            if tx.send_timeout(cmd, USER_TIMEOUT).await.is_err() {
+    async fn send_to_user(&mut self, user_id: UserId, cmd: SessionToConnectionMsg) {
+        if let Some(conn) = self.connections.get_mut(&user_id) {
+            if conn
+                .bichannel
+                .s
+                .send_timeout(cmd, USER_TIMEOUT)
+                .await
+                .is_err()
+            {
                 self.timeout_user(user_id).await;
             }
         }
     }
-    async fn broadcast(&mut self, cmd: ServerSessionCommand) {
-        let user_ids: Vec<_> = self.users.keys().copied().collect();
+    async fn broadcast(&mut self, cmd: SessionToConnectionMsg) {
+        let user_ids: Vec<_> = self.connections.keys().copied().collect();
         for user_id in user_ids {
             self.send_to_user(user_id, cmd.clone()).await;
         }
     }
-    async fn run(mut self) {
-        tracing::info!("Running proposal {}", self.proposal_id);
-        while let Some(event) = self.rx.recv().await {
-            match event.event_type {
-                ProposalEventType::Enter(tx) => {
-                    tracing::info!("User {} entered.", event.user_id);
-                    self.broadcast(ServerSessionCommand::TerminalPrint(format!(
-                        "User {} entered.\n",
-                        event.user_id
-                    )))
-                    .await;
-                    self.users.insert(event.user_id, tx);
-                    self.send_to_user(
-                        event.user_id,
-                        ServerSessionCommand::TerminalPrint("Welcome to session.\n".into()),
-                    )
-                    .await;
-                    self.send_to_user(event.user_id, ServerSessionCommand::TerminalRequestLine)
-                        .await;
-                }
-                ProposalEventType::Command(cmd) => match cmd {
-                    ClientSessionCommand::TerminalLine(text) => {
-                        self.broadcast(ServerSessionCommand::TerminalPrint(text))
-                            .await;
-                        self.send_to_user(event.user_id, ServerSessionCommand::TerminalRequestLine)
-                            .await;
-                    }
-                },
-                ProposalEventType::Leave => {
-                    if self.users.remove(&event.user_id).is_some() {
-                        tracing::info!("User {} left.", event.user_id);
-                        self.broadcast(ServerSessionCommand::TerminalPrint(format!(
-                            "User {} left.\n",
-                            event.user_id
-                        )))
-                        .await;
-                    }
-                }
-            }
-        }
-    }
 }
 
-impl Drop for Proposal {
+impl Drop for ProposalActor {
     fn drop(&mut self) {
-        self.proposals
-            .lock()
-            .expect("Mutex to not be poisoned")
+        self.aero
+            .obtain::<ProposalManager>()
+            .proposals
             .remove(&self.proposal_id);
     }
 }

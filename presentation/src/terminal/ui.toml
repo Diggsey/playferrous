@@ -1,7 +1,7 @@
 help_text = """
 Playferrous terminal interface
 
-While in a game, server commands may still be executed by prefixing them with a `.`
+While in a session, server commands may still be executed by prefixing them with a `/`
 """
 
 [[group]]
@@ -34,6 +34,10 @@ args = "<game-type>"
 name = "withdraw"
 args = "<proposal-id>"
 
+[[group.command]]
+name = "invite"
+args = "<user-or-group-id>"
+
 [[group]]
 help_text = "Sessions:"
 
@@ -46,6 +50,43 @@ args = "<session-id>"
 
 [[group.command]]
 name = "exit"
+
+[[group]]
+help_text = "Friends:"
+
+[[group.command]]
+name = "friends"
+
+[[group]]
+help_text = "Groups:"
+
+[[group.command]]
+name = "groups"
+
+[[group]]
+help_text = "Messages:"
+
+[[group.command]]
+name = "messages"
+
+[[group.command]]
+name = "read"
+args = "<message-id>"
+
+[[group]]
+help_text = "Requests:"
+
+[[group.command]]
+name = "accept"
+args = "<request-id>"
+
+[[group.command]]
+name = "decline"
+args = "<request-id>"
+
+[[group.command]]
+name = "cancel"
+args = "<request-id>"
 
 [[group]]
 help_text = "Misc:"

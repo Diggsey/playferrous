@@ -1,14 +1,15 @@
 use std::convert::Infallible;
 
-use aerosol::{Aerosol, AsyncConstructible};
+use aerosol::{Aero, AsyncConstructible};
 use async_trait::async_trait;
 use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Transaction};
 use thiserror::Error;
 
+pub mod message;
 pub mod proposal;
 pub mod session;
-
-pub type PgTransaction = Transaction<'static, Postgres>;
+pub mod transaction;
+pub mod user;
 
 #[derive(Debug, Clone)]
 pub struct Database {
@@ -18,7 +19,7 @@ pub struct Database {
 #[async_trait]
 impl AsyncConstructible for Database {
     type Error = sqlx::Error;
-    async fn construct_async(_aero: &Aerosol) -> Result<Self, Self::Error> {
+    async fn construct_async(_aero: &Aero) -> Result<Self, Self::Error> {
         let url = std::env::var("DATABASE_URL").expect("Missing DATABASE_URL");
         let pool = PgPoolOptions::new()
             .max_connections(5)
@@ -28,34 +29,28 @@ impl AsyncConstructible for Database {
     }
 }
 
-impl Database {
-    pub async fn begin(&self) -> Result<PgTransaction, sqlx::Error> {
-        self.pool.begin().await
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum TransactError<A = Infallible> {
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     App(A),
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
 }
 
 pub fn convert_error<A: From<anyhow::Error>>(e: TransactError<A>) -> A {
     match e {
         TransactError::App(e) => e,
         TransactError::Sqlx(e) => A::from(e.into()),
+        TransactError::Internal(e) => A::from(e),
     }
 }
 
 macro_rules! transact {
     ($err:ty, $aero:expr, |$tx:ident| $expr:expr) => {{
         async {
-            let db = $aero
-                .try_obtain_async::<$crate::database::Database>()
-                .await?;
-            let mut tx = db.begin().await?;
+            let mut tx = crate::database::transaction::Transaction::begin(&$aero).await?;
             let $tx = &mut tx;
             match async { $expr }.await {
                 Ok(v) => {

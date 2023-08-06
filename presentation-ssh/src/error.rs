@@ -15,4 +15,6 @@ pub enum Error {
     FailedToStart(#[source] io::Error),
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
 }

@@ -1,22 +1,21 @@
 use std::sync::Arc;
 
-use aerosol::{Aerosol, AsyncConstructible};
+use aerosol::{Aero, AsyncConstructible};
 use async_trait::async_trait;
 use launchers::AnyLauncherConfig;
 use presentations::{AnyPresentationConfig, Presentations};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 
-use crate::user_management::UserManagementImpl;
+use crate::{connection_manager::ConnectionManager, user_management::UserManagementImpl};
 
 #[macro_use]
 mod database;
-mod active_session;
+mod connection_manager;
 mod game_manager;
 mod launchers;
 mod presentations;
 mod proposal_manager;
-mod terminal_session;
 mod user_management;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,7 +27,7 @@ struct Config {
 #[async_trait]
 impl AsyncConstructible for Config {
     type Error = anyhow::Error;
-    async fn construct_async(_aero: &Aerosol) -> Result<Self, Self::Error> {
+    async fn construct_async(_aero: &Aero) -> Result<Self, Self::Error> {
         let config_str = tokio::fs::read_to_string("playferrous.toml").await?;
         Ok(toml::from_str(&config_str)?)
     }
@@ -42,9 +41,16 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let aero = Aerosol::new();
-    aero.init::<Arc<UserManagementImpl>>();
-    aero.init_async::<Arc<Presentations>>().await;
+    let aero = Aero::new()
+        .with_constructed::<Arc<UserManagementImpl>>()
+        .with_constructed::<ConnectionManager>()
+        .with_constructed_async::<Arc<Presentations>>()
+        .await;
+
+    aero.get::<ConnectionManager, _>()
+        .broadcast([], |_| panic!())
+        .await;
+
     println!("Started...");
     Ok(())
 }

@@ -1,6 +1,7 @@
 use std::{any::Any, sync::Arc};
 
-use aerosol::{Aerosol, AsyncConstructible};
+use aerosol::{Aero, AsyncConstructible};
+use anyhow::Context;
 use async_trait::async_trait;
 use playferrous_presentation::{Presentation, UserManagement};
 use playferrous_presentation_ssh::PresentationSsh;
@@ -33,11 +34,14 @@ pub struct Presentations {
 #[async_trait]
 impl AsyncConstructible for Presentations {
     type Error = anyhow::Error;
-    async fn construct_async(aero: &Aerosol) -> Result<Self, Self::Error> {
+    async fn construct_async(aero: &Aero) -> Result<Self, Self::Error> {
         let config: Arc<Config> = aero.obtain_async().await;
         let mut presentations = Vec::new();
         for item in &config.presentation {
-            presentations.push(item.start_presentation(aero.get()).await?);
+            presentations.push(
+                item.start_presentation(aero.try_get().context("User management")?)
+                    .await?,
+            );
         }
         Ok(Self {
             _presentations: presentations,

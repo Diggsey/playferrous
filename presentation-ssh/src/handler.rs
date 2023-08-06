@@ -3,7 +3,9 @@ use std::{fmt, sync::Arc};
 use async_trait::async_trait;
 use russh::{ChannelId, MethodSet};
 
-use playferrous_presentation::{UserId, UserManagement, UserManagementError};
+use playferrous_presentation::{
+    terminal::TerminalPresentation, UserId, UserManagement, UserManagementError,
+};
 use tokio::sync::mpsc;
 use tracing::{error, instrument};
 
@@ -66,13 +68,14 @@ impl Handler {
             .session
             .clone()
             .expect("Should not try to connect without channel");
-        let terminal_connection = self.user_management.connect_terminal(user_id).await?;
+        let presentation_connection =
+            TerminalPresentation::connect(&*self.user_management, user_id).await?;
         let (tx, rx) = mpsc::channel(4);
         self.data_stream = Some(tx);
 
         tokio::spawn(async move {
             let res = client::run(
-                terminal_connection,
+                presentation_connection,
                 DataReader::new(rx),
                 DataWriter::new(session.clone(), channel),
             )

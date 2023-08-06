@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use aerosol::{Aerosol, AsyncConstructible};
+use aerosol::{Aero, AsyncConstructible};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +32,7 @@ pub struct Launchers {
 #[async_trait]
 impl AsyncConstructible for Launchers {
     type Error = anyhow::Error;
-    async fn construct_async(aero: &Aerosol) -> Result<Self, Self::Error> {
+    async fn construct_async(aero: &Aero) -> Result<Self, Self::Error> {
         let config: Arc<Config> = aero.obtain_async().await;
         let mut launchers = Vec::new();
         for item in &config.launcher {
